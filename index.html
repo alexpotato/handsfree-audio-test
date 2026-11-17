@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hands-free Audio Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 30px auto; padding: 16px; background: #111; color: #eee; }
+    h1 { color: #4fc3f7; }
+    button { padding: 12px 18px; margin: 6px; font-size: 16px; border: none; border-radius: 6px; cursor: pointer; }
+    button.play { background: #4caf50; color: white; }
+    button.listen { background: #2196f3; color: white; }
+    button.stop { background: #ff9800; color: white; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin: 12px 0; font-weight: bold; min-height: 1.4em; }
+    .note { background: #222; padding: 12px; border-radius: 8px; margin: 12px 0; }
+    #transcript { background: #1a1a1a; padding: 10px; border-radius: 6px; min-height: 80px; white-space: pre-wrap; }
+    #debug { background: #1a1a1a; padding: 8px; border-radius: 6px; font-family: monospace; font-size: 12px; white-space: pre-wrap; margin-top: 8px; }
+    label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <h1>Hands-free Audio Test</h1>
+  <div class="note">
+    <a href="https://167.99.231.180:8443/" style="color:#4fc3f7">https://167.99.231.180:8443/</a>
+  </div>
+
+  <h2>Always-On Listening + Speak Back</h2>
+  <label>
+    <input type="checkbox" id="ttsEnabled" checked> Speak responses aloud
+  </label>
+  <button id="startListen" class="listen">Start Always Listening</button>
+  <button id="stopListen" class="stop" disabled>Stop Listening</button>
+  <button id="testSpeak" class="play">Test Speak</button>
+  <div id="listenStatus" class="status">Not listening</div>
+  <div id="transcript"></div>
+  <div id="debug"></div>
+
+  <script>
+    let recognition;
+    let listening = false;
+    let speaking = false;
+    let lastSpoken = '';
+    let interimTimer = null;
+
+    function debug(msg) {
+      const el = document.getElementById('debug');
+      el.textContent = new Date().toLocaleTimeString() + ' ' + msg + '\n' + el.textContent.slice(0, 400);
+    }
+
+    function speak(text) {
+      const statusEl = document.getElementById('listenStatus');
+      if (!document.getElementById('ttsEnabled').checked || !text.trim()) return;
+      if (text.trim() === lastSpoken) return;
+      if (!window.speechSynthesis) {
+        debug('no speechSynthesis');
+        return;
+      }
+
+      debug('speak() called with: ' + text.slice(0, 40));
+      lastSpoken = text.trim();
+      speaking = true;
+
+      if (recognition && listening) {
+        try { recognition.stop(); } catch (e) { debug('stop err: ' + e.message); }
+      }
+
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'en-US';
+      utterance.rate = 1.0;
+      utterance.volume = 1.0;
+
+      const voices = window.speechSynthesis.getVoices();
+      const preferred = voices.find(v => v.lang.startsWith('en') && /Samantha|Alex|Daniel|Karen|Moira/i.test(v.name))
+                     || voices.find(v => v.lang.startsWith('en'));
+      if (preferred) utterance.voice = preferred;
+
+      utterance.onstart = () => {
+        statusEl.textContent = 'Speaking…';
+        debug('TTS started');
+      };
+
+      utterance.onend = () => {
+        speaking = false;
+        statusEl.textContent = 'Listening…';
+        debug('TTS ended');
+        if (listening && recognition) {
+          setTimeout(() => {
+            try { recognition.start(); debug('recognition restarted'); } catch (e) { debug('restart err: ' + e.message); }
+          }, 250);
+        }
+      };
+
+      utterance.onerror = (e) => {
+        speaking = false;
+        statusEl.textContent = 'TTS error: ' + e.error;
+        debug('TTS error: ' + e.error);
+        if (listening && recognition) {
+          setTimeout(() => { try { recognition.start(); } catch (e) {} }, 250);
+        }
+      };
+
+      window.speechSynthesis.speak(utterance);
+    }
+
+    function setupRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        document.getElementById('listenStatus').textContent = 'Speech Recognition not supported.';
+        return null;
+      }
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = 'en-US';
+
+      rec.onstart = () => {
+        if (!speaking) document.getElementById('listenStatus').textContent = 'Listening…';
+        debug('recognition started');
+      };
+
+      rec.onresult = (event) => {
+        if (speaking) {
+          debug('onresult ignored (speaking)');
+          return;
+        }
+
+        let finalText = '';
+        let interimText = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalText += transcript + ' ';
+          } else {
+            interimText += transcript;
+          }
+        }
+
+        debug('final="' + finalText.trim() + '" interim="' + interimText.trim().slice(0, 30) + '"');
+
+        if (finalText.trim()) {
+          document.getElementById('transcript').textContent += finalText;
+          clearTimeout(interimTimer);
+          speak(finalText.trim());
+        } else if (interimText.trim().length > 3) {
+          clearTimeout(interimTimer);
+          interimTimer = setTimeout(() => {
+            if (!speaking && interimText.trim()) {
+              document.getElementById('transcript').textContent += interimText + ' ';
+              speak(interimText.trim());
+            }
+          }, 1200);
+        }
+      };
+
+      rec.onerror = (e) => {
+        if (e.error !== 'no-speech' && e.error !== 'aborted') {
+          document.getElementById('listenStatus').textContent = 'Listen error: ' + e.error;
+          debug('rec error: ' + e.error);
+        }
+      };
+
+      rec.onend = () => {
+        debug('recognition ended');
+        if (listening && !speaking) {
+          setTimeout(() => {
+            try { rec.start(); } catch (e) { debug('onend restart err: ' + e.message); }
+          }, 300);
+        }
+      };
+
+      return rec;
+    }
+
+    document.getElementById('startListen').onclick = async () => {
+      try {
+        if (window.speechSynthesis) {
+          const dummy = new SpeechSynthesisUtterance(' ');
+          window.speechSynthesis.speak(dummy);
+        }
+        if (!recognition) recognition = setupRecognition();
+        if (!recognition) return;
+        listening = true;
+        recognition.start();
+        document.getElementById('startListen').disabled = true;
+        document.getElementById('stopListen').disabled = false;
+        debug('start clicked');
+      } catch (err) {
+        document.getElementById('listenStatus').textContent = 'Could not start: ' + err.message;
+        debug('start err: ' + err.message);
+      }
+    };
+
+    document.getElementById('stopListen').onclick = () => {
+      listening = false;
+      speaking = false;
+      clearTimeout(interimTimer);
+      if (recognition) try { recognition.stop(); } catch (e) {}
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      document.getElementById('startListen').disabled = false;
+      document.getElementById('stopListen').disabled = true;
+      document.getElementById('listenStatus').textContent = 'Stopped';
+      debug('stopped');
+    };
+
+    document.getElementById('testSpeak').onclick = () => {
+      speak('This is a test of text to speech.');
+    };
+
+    if (window.speechSynthesis) {
+      window.speechSynthesis.onvoiceschanged = () => { debug('voices loaded: ' + speechSynthesis.getVoices().length); };
+    }
+  </script>
+</body>
+</html>
